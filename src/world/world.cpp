@@ -172,3 +172,22 @@ void worldUploadDirty(World& w, VulkanContext& ctx)
         // wc.gpu.coord already set when chunk was created
     }
 }
+
+void World::clearAllChunks() {
+    // If you have GPU buffers in chunks, defer-destroy them here
+    map.clear();
+}
+
+WorldChunk* World::createChunk(const WorldKey& k) {
+    auto it = map.find(k);
+    if (it != map.end()) return it->second.get();
+    auto wc = std::make_unique<WorldChunk>();
+    // init voxel storage (set to AIR)
+    for (int y = 0; y < CHUNK_HEIGHT; ++y)
+        for (int z = 0; z < CHUNK_SIZE; ++z)
+            for (int x = 0; x < CHUNK_SIZE; ++x)
+                wc->data.set(x, y, z, BLOCK_AIR);
+    auto* ptr = wc.get();
+    map.emplace(k, std::move(wc));
+    return ptr;
+}

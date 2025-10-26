@@ -41,6 +41,8 @@ struct World {
     std::unordered_map<WorldKey, std::unique_ptr<WorldChunk>, WorldKeyHash> map;
     uint32_t seed = 1337;
 
+    void clearAllChunks();
+    WorldChunk* createChunk(const WorldKey& k);
     // ensure chunks in radius (cx,cz), only cy=0 for now
     void ensure(VulkanContext& ctx, int centerCx, int centerCz, int radius);
     void draw(VulkanContext& ctx, VkCommandBuffer cb);

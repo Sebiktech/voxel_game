@@ -190,6 +190,34 @@ void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s) {
     ImGui::Text("Chunks: %u total  %u ready", s.chunksTotal, s.chunksReady);
     ImGui::Text("Tris:   %llu", (unsigned long long)s.tris);
 
+    static char pathBuf[256] = "saves/world.vwld";
+    static std::string lastMsg;
+
+    ImGui::Separator();
+    ImGui::Text("World I/O");
+    ImGui::InputText("Path", pathBuf, IM_ARRAYSIZE(pathBuf));
+
+    if (ImGui::Button("Save")) {
+        std::string err;
+        if (worldSaveToFile(*s.worldRef, pathBuf, &err))  // see below: pass world ptr
+            lastMsg = std::string("Saved to ") + pathBuf;
+        else
+            lastMsg = std::string("Save failed: ") + err;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Load")) {
+        std::string err;
+        if (worldLoadFromFile(*s.worldRef, pathBuf, &err)) {
+            // Upload all dirty chunks now
+            worldUploadDirty(*s.worldRef, *s.ctxRef); // see below for passing ctx
+            lastMsg = std::string("Loaded from ") + pathBuf;
+        }
+        else {
+            lastMsg = std::string("Load failed: ") + err;
+        }
+    }
+    if (!lastMsg.empty()) ImGui::TextWrapped("%s", lastMsg.c_str());
+
     ImGui::End();
 
     ImGui::Render();

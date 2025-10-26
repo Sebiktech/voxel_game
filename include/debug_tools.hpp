@@ -5,15 +5,18 @@
 #include <glm/glm.hpp>
 #include "vk_utils.hpp"
 #include "world/world.hpp"
+#include "world/world_io.hpp"
 #include "GLFW/glfw3.h"
 
 // --------- stats to show in overlay/log ----------
 struct DebugStats {
+    VulkanContext* ctxRef = nullptr;
     // frame
     float   fps = 0.0f;
     float   dt = 0.0f;
 
     // world
+    World* worldRef = nullptr;     // read-only in UI; cast away const if you call io
     uint32_t chunksTotal = 0;
     uint32_t chunksReady = 0;   // have VBO+IBO+indices>0
     uint64_t tris = 0;

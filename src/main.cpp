@@ -235,6 +235,8 @@ int main()
             //input.update(dt);
 
             // Debug Tools
+            debugStats.worldRef = &world;
+            debugStats.ctxRef = &ctx;
             dbgSetFrame(debugStats, dt);
             dbgSetCamera(debugStats, cam.position, cam.yaw, cam.pitch);
             dbgCollectWorldStats(world, debugStats);
@@ -244,7 +246,6 @@ int main()
             int f3State = glfwGetKey(window, GLFW_KEY_F3);
             if (f3State == GLFW_PRESS && !f3WasDown) {    // rising edge
                 debugStats.overlay = !debugStats.overlay;
-                std::cout << debugStats.overlay;
             }
             f3WasDown = (f3State == GLFW_PRESS);
 
