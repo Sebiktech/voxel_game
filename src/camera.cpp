@@ -12,7 +12,7 @@ void FPSCamera::setViewportSize(uint32_t width, uint32_t height) {
 void FPSCamera::setCursorCaptured(GLFWwindow* window, bool captured) {
     cursorCaptured = captured;
     glfwSetInputMode(window, GLFW_CURSOR, captured ? GLFW_CURSOR_DISABLED : GLFW_CURSOR_NORMAL);
-    firstMouse = true; // reset delta
+    if (captured) resetMouse(window);
 }
 
 glm::vec3 FPSCamera::forward() const {
@@ -39,6 +39,16 @@ glm::mat4 FPSCamera::proj() const {
     // Vulkan NDC has Y flipped
     P[1][1] *= -1.0f;
     return P;
+}
+
+void FPSCamera::resetMouse(GLFWwindow* win) {
+    // read current cursor and set as last to avoid a big jump
+    double x, y;
+    glfwGetCursorPos(win, &x, &y);
+    lastMouseX = float(x);
+    lastMouseY = float(y);
+    firstMouse = true;         // if you use this flag
+    // no yaw/pitch change here; just re-arm deltas
 }
 
 void FPSCamera::handleMouse(GLFWwindow* window) {

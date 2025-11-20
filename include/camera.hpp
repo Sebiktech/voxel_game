@@ -43,4 +43,6 @@ private:
     // mouse state
     bool firstMouse = true;
     double lastMouseX = 0.0, lastMouseY = 0.0;
+
+    void resetMouse(GLFWwindow* window);
 };

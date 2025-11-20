@@ -14,6 +14,12 @@ static void destroyChunkGPU(VkDevice dev, ChunkGPU& g) {
 static bool createAndFill(VulkanContext& ctx, const void* data, VkDeviceSize bytes,
     VkBufferUsageFlags usage, VkBuffer& outB, VkDeviceMemory& outM);
 
+// find by key
+WorldChunk* World::find(const WorldKey& k) {
+    auto it = map.find(k);
+    return (it == map.end()) ? nullptr : it->second.get();
+}
+
 void World::ensure(VulkanContext& ctx, int centerCx, int centerCz, int radius)
 {
     for (int dz = -radius; dz <= radius; ++dz)
@@ -190,4 +196,15 @@ WorldChunk* World::createChunk(const WorldKey& k) {
     auto* ptr = wc.get();
     map.emplace(k, std::move(wc));
     return ptr;
+}
+
+// destroy by key
+void World::destroyChunk(const WorldKey& k) {
+    auto it = map.find(k);
+    if (it == map.end()) return;
+
+    // If you have GPU buffers in it->second->gpu, defer-destroy them here
+    // deferDestroyBuffer(ctx, ...);  // (only if you’ve got a GC in place)
+
+    map.erase(it);
 }

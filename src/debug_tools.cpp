@@ -218,6 +218,67 @@ void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s) {
     }
     if (!lastMsg.empty()) ImGui::TextWrapped("%s", lastMsg.c_str());
 
+    // === Window / Display ===
+    static int modeIndex = 0; // 0=Windowed, 1=Borderless, 2=Exclusive
+    static const char* modes[] = { "Windowed", "Borderless Fullscreen", "Exclusive Fullscreen" };
+    ImGui::Separator();
+    ImGui::Text("Display");
+    ImGui::Combo("Mode", &modeIndex, modes, IM_ARRAYSIZE(modes));
+
+    // Common resolutions (you can expand this)
+    struct Res { int w, h; const char* label; };
+    static Res presets[] = {
+        {1280, 720,  "1280 x 720"},
+        {1600, 900,  "1600 x 900"},
+        {1920, 1080, "1920 x 1080"},
+        {2560, 1440, "2560 x 1440"},
+        {3840, 2160, "3840 x 2160"},
+    };
+    static int presetIndex = 2; // default 1920x1080
+    ImGui::Combo("Resolution", &presetIndex,
+        [](void* data, int idx, const char** out_text) {
+            auto* a = (Res*)data; *out_text = a[idx].label; return true;
+        },
+        presets, (int)(sizeof(presets) / sizeof(presets[0])));
+
+    // Apply buttons
+    if (ImGui::Button("Apply Display Settings")) {
+        // Save/restore windowed size & pos (static across frames)
+        static int prevX = 100, prevY = 100, prevW = 1280, prevH = 720;
+
+        GLFWwindow* win = ctx.window;               // <- you already store this in VulkanContext
+        GLFWmonitor* mon = glfwGetPrimaryMonitor(); // pick primary; add a monitor combo later if you like
+        const GLFWvidmode* vm = glfwGetVideoMode(mon);
+
+        int ww = presets[presetIndex].w;
+        int wh = presets[presetIndex].h;
+        ctx.framebufferResized = true;
+
+        if (modeIndex == 0) { // Windowed
+            // restore decorations & size/pos
+            glfwSetWindowAttrib(win, GLFW_DECORATED, GLFW_TRUE);
+            glfwSetWindowMonitor(win, nullptr, prevX, prevY, ww, wh, 0);
+        }
+        else if (modeIndex == 1) { // Borderless fullscreen (windowed)
+            // remember current pos/size before going borderless
+            glfwGetWindowPos(win, &prevX, &prevY);
+            glfwGetWindowSize(win, &prevW, &prevH);
+
+            glfwSetWindowAttrib(win, GLFW_DECORATED, GLFW_FALSE);
+            // place over the monitor area, size = monitor mode
+            glfwSetWindowMonitor(win, nullptr, 0, 0, vm->width, vm->height, 0);
+        }
+        else { // Exclusive fullscreen
+            // remember current pos/size before switching
+            glfwGetWindowPos(win, &prevX, &prevY);
+            glfwGetWindowSize(win, &prevW, &prevH);
+
+            // set exact video mode (refresh from vm)
+            glfwSetWindowMonitor(win, mon, 0, 0, vm->width, vm->height, vm->refreshRate);
+        }
+    }
+
+
     ImGui::End();
 
     ImGui::Render();
@@ -227,10 +288,23 @@ void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s) {
 #endif
 }
 
-void dbgImGuiShutdown(VulkanContext& /*ctx*/) {
+void dbgImGuiShutdown() {
 #ifdef IMGUI_VERSION
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    if (g_imguiPool) { /* optional: keep across recreates */
+        // vkDestroyDescriptorPool(ctx.device, g_imguiPool, nullptr); // if you want
+        // g_imguiPool = VK_NULL_HANDLE;
+    }
+    ImGui::DestroyContext(nullptr);
+#endif
+}
+
+bool dbgImGuiReinit(VulkanContext& ctx, GLFWwindow* win) {
+#ifdef IMGUI_VERSION
+    dbgImGuiShutdown();
+    return dbgImGuiInit(ctx, win);
+#else
+    (void)ctx; (void)win; return false;
 #endif
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include <vulkan/vulkan.h>
+#include <GLFW/glfw3.h>
 #include <vector>
 #include <string>
 #include <optional>
@@ -106,6 +107,8 @@ struct VulkanContext {
     float maxSamplerAnisotropy = 1.0f;
     float currentAniso = 1.f;
     bool anisotropyFeature = false;
+    GLFWwindow* window = nullptr;
+    bool framebufferResized = false; // <— ensure the 'bool' type is present
 };
 
 struct RegionGPU {

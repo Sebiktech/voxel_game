@@ -26,11 +26,14 @@
 #include "world/world_edit.hpp"
 #include "world/world_raycast.hpp"
 #include "world/world.hpp"
+#include "world/world_stream.hpp"
 #include "player.hpp"
 
 
 float pickMaxDist = 8.0f;
-bool physicsMode = true;
+bool physicsMode = true; 
+static bool g_uiMode = false;  // true = UI focus (mouse free), false = Game focus (mouse captured)
+static bool g_escWasDown = false;
 //static Input input;
 static DebugStats debugStats;
 EditMode editMode = EditMode::Small;
@@ -68,6 +71,12 @@ static void glfwErrorCallback(int code, const char* desc)
     std::cerr << "[GLFW] (" << code << ") " << desc << std::endl;
 }
 
+static void framebufferResizeCallback(GLFWwindow* win, int width, int height) {
+    auto* ctx = reinterpret_cast<VulkanContext*>(glfwGetWindowUserPointer(win));
+    if (!ctx) return;
+    ctx->framebufferResized = true;    // mark for recreate
+}
+
 // at top-scope of main.cpp
 static double g_scrollY = 0.0;
 static void scroll_cb(GLFWwindow*, double /*xoff*/, double yoff) { g_scrollY += yoff; }
@@ -83,12 +92,19 @@ int main()
         GLFWwindow* window = glfwCreateWindow(1280, 720, "Voxel Game (Starter)", nullptr, nullptr);
         if (!window) throw std::runtime_error("Failed to create window");
 
+        if (glfwRawMouseMotionSupported())
+            glfwSetInputMode(window, GLFW_RAW_MOUSE_MOTION, GLFW_TRUE);
+
         //input.init(window);
         glfwSetScrollCallback(window, scroll_cb);
 
         world.seed = 1337u;
 
         VulkanContext ctx{};
+
+        ctx.window = window;
+        glfwSetWindowUserPointer(window, &ctx);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
 
         // Create instance with required extensions
         uint32_t extCount = 0;
@@ -156,7 +172,7 @@ int main()
         setupDebug(ctx);
         FPSCamera cam;
         cam.setViewportSize(ctx.swapchainExtent.width, ctx.swapchainExtent.height);
-        cam.setCursorCaptured(window, true);
+        cam.setCursorCaptured(window, !g_uiMode); // keep cursor mode consistent
         cam.position = { 8.0f, 8.0f, 30.0f }; // tweak as you like
         cam.yaw = -90.0f; cam.pitch = 0.0f;
         std::string shaderDir = std::string("shaders"); // runtime dir = ${build}/shaders
@@ -199,9 +215,23 @@ int main()
         // For now, we won't create swapchain; just a running loop + device ready.
         std::cout << "Vulkan initialized. Running loop..." << std::endl;
 
-        int cx = int(std::floor(cam.position.x / (CHUNK_SIZE * VOXEL_SCALE)));
-        int cz = int(std::floor(cam.position.z / (CHUNK_SIZE * VOXEL_SCALE)));
-        world.ensure(ctx, cx, cz, /*radius*/ 2); // 5x5 chunks
+        auto worldToChunk = [](float w) {
+            int v = (int)std::floor(w);
+            int q = v / CHUNK_SIZE, r = v % CHUNK_SIZE;
+            if (r < 0) { r += CHUNK_SIZE; --q; }
+            return q;
+            };
+
+        static int lastCamCx = 1e9, lastCamCz = 1e9;
+        int camCx = worldToChunk(cam.position.x);
+        int camCz = worldToChunk(cam.position.z);
+
+        if (camCx != lastCamCx || camCz != lastCamCz) {
+            streamEnsureAround(world, ctx, camCx, camCz, VIEW_DIST);
+            streamUnloadFar(world, camCx, camCz, VIEW_DIST);
+            lastCamCx = camCx; lastCamCz = camCz;
+        }
+        //world.ensure(ctx, cx, cz, /*radius*/ 2); // 5x5 chunks
         worldUploadDirty(world, ctx);
 
         // debug: how many chunks and total tris?
@@ -240,6 +270,29 @@ int main()
             dbgSetFrame(debugStats, dt);
             dbgSetCamera(debugStats, cam.position, cam.yaw, cam.pitch);
             dbgCollectWorldStats(world, debugStats);
+
+            // --- UI focus toggle with ESC ---
+            int esc = glfwGetKey(window, GLFW_KEY_ESCAPE);
+            if (esc == GLFW_PRESS && !g_escWasDown) {
+                g_uiMode = !g_uiMode;
+                std::cout << g_uiMode;
+
+                // capture or release cursor for your FPS camera
+                cam.setCursorCaptured(window, !g_uiMode); // true = lock/hide, false = free cursor
+
+                // hard refocus the window (important after fullscreen switches)
+                glfwFocusWindow(window);
+                //ImGui::ClearActiveID();
+            }
+            g_escWasDown = (esc == GLFW_PRESS);
+
+            ImGuiIO& io = ImGui::GetIO();
+
+            // Block gameplay input if:
+            //  - you're in UI mode (Esc toggled), OR
+            //  - ImGui wants the device (hovering widgets, active text box, etc.)
+            const bool blockMouse = g_uiMode || io.WantCaptureMouse;
+            const bool blockKeys = g_uiMode || io.WantCaptureKeyboard;
 
             // Toggle F3 overlay (edge-triggered)
             static bool f3WasDown = false;                // persist across frames
@@ -319,102 +372,138 @@ int main()
                 spacePrev = space;
             }
 
-            auto camF = glm::normalize(glm::vec3(std::cos(glm::radians(cam.yaw)), 0.0f,
-                std::sin(glm::radians(cam.yaw))));
-            auto camR = glm::normalize(glm::cross(camF, glm::vec3(0, 1, 0)));
-
+            
             glm::vec3 wish(0.0f);
-            if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wish += camF;
-            if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wish -= camF;
-            if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wish += camR;
-            if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wish -= camR;
-            if (glm::length(wish) > 0.0f) wish = glm::normalize(wish);
+            if (!blockKeys)
+            {
+                auto camF = glm::normalize(glm::vec3(std::cos(glm::radians(cam.yaw)), 0.0f,
+                    std::sin(glm::radians(cam.yaw))));
+                auto camR = glm::normalize(glm::cross(camF, glm::vec3(0, 1, 0)));
 
-            if (physicsMode) {
-                player.simulate(world, wish, dt);
-                cam.position = player.camPosition();  // camera follows player head
-                // keep your existing cam yaw/pitch handling (mouse) for look
+                if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wish += camF;
+                if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wish -= camF;
+                if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wish += camR;
+                if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wish -= camR;
+                if (glm::length(wish) > 0.0f) wish = glm::normalize(wish);
             }
-            else {
-                // your existing free-fly camera movement (use wish & keys to move cam directly)
-                float flySpeed = 8.0f;
-                float stepAmount = flySpeed * dt;   // both floats
-                cam.position += wish * stepAmount;
-                if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) cam.position.y += flySpeed * dt;
-                if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) cam.position.y -= flySpeed * dt;
-            }
-
-            static bool lWasDown = false, rWasDown = false;
-            int l = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
-            int r = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
-
-            if ((l == GLFW_PRESS && !lWasDown) || (r == GLFW_PRESS && !rWasDown)) {
-                // z kamery
-                glm::vec3 p = cam.position;          // public field v tvojej FPSCamera
-                glm::vec3 dir = cam.forward();    // smer poh?adu
-                // else:
-                float cy = glm::radians(cam.yaw), cp = glm::radians(cam.pitch);
-                glm::vec3 dir2 = glm::normalize(glm::vec3(std::cos(cp) * std::cos(cy),
-                    std::sin(cp),
-                    std::cos(cp) * std::sin(cy)));
-
-                RayHit hit = raycastWorld(world, cam.position, dir /*or dir2*/, pickMaxDist);
-                if (hit.hit) {
-                    bool changed = false;
-
-                    if (l == GLFW_PRESS && !lWasDown) {
-                        // remove the hit voxel (Small/Big depends on editMode)
-                        changed |= worldEditSet(world, hit.vx, hit.vy, hit.vz, 0, editMode);
-                    }
-                    if (r == GLFW_PRESS && !rWasDown) {
-                        // place next to the face we hit (use entry cell or normal offset)
-                        int px = hit.vx + hit.nx;
-                        int py = hit.vy + hit.ny;
-                        int pz = hit.vz + hit.nz;
-                        changed |= worldEditSet(world, px, py, pz, (BlockID)currentMaterial, editMode);
-                    }
-
-                    if (changed) {
-                        // this walks chunks with wc->needsUpload==true and pushes new VBO/IBO
-                        worldUploadDirty(world, ctx);
-                    }
+            if (!blockKeys)
+            {
+                if (physicsMode) {
+                    player.simulate(world, wish, dt);
+                    cam.position = player.camPosition();  // camera follows player head
+                    // keep your existing cam yaw/pitch handling (mouse) for look
+                }
+                else {
+                    // your existing free-fly camera movement (use wish & keys to move cam directly)
+                    float flySpeed = 8.0f;
+                    float stepAmount = flySpeed * dt;   // both floats
+                    cam.position += wish * stepAmount;
+                    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) cam.position.y += flySpeed * dt;
+                    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) cam.position.y -= flySpeed * dt;
                 }
             }
 
-            lWasDown = (l == GLFW_PRESS);
-            rWasDown = (r == GLFW_PRESS);
+            if(!blockMouse) cam.handleMouse(window);
+            if(!blockKeys) cam.handleKeys(window, dt);
+
+            if (!blockKeys)
+            {
+
+                static bool lWasDown = false, rWasDown = false;
+                int l = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
+                int r = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
+
+                if ((l == GLFW_PRESS && !lWasDown) || (r == GLFW_PRESS && !rWasDown)) {
+                    // z kamery
+                    glm::vec3 p = cam.position;          // public field v tvojej FPSCamera
+                    glm::vec3 dir = cam.forward();    // smer poh?adu
+                    // else:
+                    float cy = glm::radians(cam.yaw), cp = glm::radians(cam.pitch);
+                    glm::vec3 dir2 = glm::normalize(glm::vec3(std::cos(cp) * std::cos(cy),
+                        std::sin(cp),
+                        std::cos(cp) * std::sin(cy)));
+
+                    RayHit hit = raycastWorld(world, cam.position, dir /*or dir2*/, pickMaxDist);
+                    if (hit.hit) {
+                        bool changed = false;
+
+                        if (l == GLFW_PRESS && !lWasDown) {
+                            // remove the hit voxel (Small/Big depends on editMode)
+                            changed |= worldEditSet(world, hit.vx, hit.vy, hit.vz, 0, editMode);
+                        }
+                        if (r == GLFW_PRESS && !rWasDown) {
+                            // place next to the face we hit (use entry cell or normal offset)
+                            int px = hit.vx + hit.nx;
+                            int py = hit.vy + hit.ny;
+                            int pz = hit.vz + hit.nz;
+                            changed |= worldEditSet(world, px, py, pz, (BlockID)currentMaterial, editMode);
+                        }
+
+                        if (changed) {
+                            // this walks chunks with wc->needsUpload==true and pushes new VBO/IBO
+                            worldUploadDirty(world, ctx);
+                        }
+                    }
+                }
+
+                lWasDown = (l == GLFW_PRESS);
+                rWasDown = (r == GLFW_PRESS);
+
+            }
 
             glfwPollEvents();
 
-            cam.handleMouse(window);
-            cam.handleKeys(window, dt);
-
             glm::mat4 mvp = cam.mvp();
-            if (!drawFrameWithMVP(ctx, &mvp[0][0], [&](VkCommandBuffer cb) {
-                world.draw(ctx, cb);                 // binds per-chunk VBO/IBO and draws
-                dbgImGuiNewFrame();                  // if you want overlay
-                dbgImGuiDraw(ctx, cb, debugStats);
-                })) {
-                // Recreate swapchain on out-of-date
+            // At the start of each frame (before drawing)
+            auto recreateSwapchainAll = [&]() {
                 int w = 0, h = 0;
                 do { glfwGetFramebufferSize(window, &w, &h); glfwWaitEvents(); } while (w == 0 || h == 0);
+
                 vkDeviceWaitIdle(ctx.device);
+
+                // Tear down GPU stuff tied to swapchain
                 destroyVoxelPipeline(ctx);
-                cleanupSwapchain(ctx);
+                cleanupSwapchain(ctx);                  // destroys fbos, rp, views, swapchain, depth, cmd pool, semaphores & fence
+
+                // Recreate swapchain-sized resources
                 if (!createSwapchain(ctx, (uint32_t)w, (uint32_t)h)) throw std::runtime_error("swapchain failed");
                 if (!createImageViews(ctx)) throw std::runtime_error("image views failed");
                 if (!createRenderPass(ctx)) throw std::runtime_error("render pass failed");
                 if (!createDepthResources(ctx, ctx.swapchainExtent.width, ctx.swapchainExtent.height))
                     throw std::runtime_error("depth resources failed");
                 if (!createFramebuffers(ctx)) throw std::runtime_error("framebuffers failed");
-                if (!createCommandPoolAndBuffers(ctx)) throw std::runtime_error("cmd pool/buffers failed");
-                if (!createVoxelPipeline(ctx, "shaders")) throw std::runtime_error("voxel pipeline failed");
-                cam.setViewportSize(ctx.swapchainExtent.width, ctx.swapchainExtent.height); // <—
-                // next loop drawFrameWithMVP will record with the new MVP
+                if (!createCommandPoolAndBuffers(ctx))
+                    throw std::runtime_error("cmd pool/buffers failed");
 
-                // Re-init ImGui with the NEW render pass
-                dbgImGuiShutdown(ctx);
-                dbgImGuiInit(ctx, window);
+                // Recreate pipeline (depends on render pass & extent)
+                if (!createVoxelPipeline(ctx, "shaders")) throw std::runtime_error("voxel pipeline failed");
+
+                // Recreate sync objects (cleanupSwapchain destroyed them)
+                if (!createSyncObjects(ctx)) throw std::runtime_error("sync objects failed");
+
+                // Re-init ImGui backend with the NEW render pass
+                if (!dbgImGuiReinit(ctx, window)) throw std::runtime_error("ImGui reinit failed");
+
+                // Update camera projection
+                cam.setViewportSize(ctx.swapchainExtent.width, ctx.swapchainExtent.height);
+
+                // Keep cursor state consistent
+                cam.setCursorCaptured(window, !g_uiMode);
+
+                ctx.framebufferResized = false;
+                };
+
+            if (ctx.framebufferResized) {
+                recreateSwapchainAll();
+            }
+
+            if (!drawFrameWithMVP(ctx, &mvp[0][0], [&](VkCommandBuffer cb) {
+                world.draw(ctx, cb);                 // binds per-chunk VBO/IBO and draws
+                dbgImGuiNewFrame();                  // if you want overlay
+                dbgImGuiDraw(ctx, cb, debugStats);
+                })) {
+                recreateSwapchainAll();
+                continue; // next frame
             }
         }
 
@@ -430,7 +519,7 @@ int main()
         destroyVoxelPipeline(ctx);
         cleanupSwapchain(ctx);
         if (ctx.instance) vkDestroyInstance(ctx.instance, nullptr);
-        dbgImGuiShutdown(ctx);
+        dbgImGuiShutdown();
         glfwDestroyWindow(window);
         glfwTerminate();
         return 0;

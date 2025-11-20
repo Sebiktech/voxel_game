@@ -43,6 +43,8 @@ struct World {
 
     void clearAllChunks();
     WorldChunk* createChunk(const WorldKey& k);
+    WorldChunk* find(const WorldKey& k);
+    void        destroyChunk(const WorldKey& k);
     // ensure chunks in radius (cx,cz), only cy=0 for now
     void ensure(VulkanContext& ctx, int centerCx, int centerCz, int radius);
     void draw(VulkanContext& ctx, VkCommandBuffer cb);

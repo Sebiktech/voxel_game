@@ -1,6 +1,9 @@
 #pragma once
 using BlockID = uint16_t;
 
+// how far we keep chunks around camera (in chunk units)
+static constexpr int VIEW_DIST = 5;   // draw/load radius (L? distance)
+
 // 0.5x voxel => na rovnakú fyzickú výšku treba 2× viac blokov
 constexpr float VOXEL_SCALE = 0.25f;
 constexpr int   VOXEL_HEIGHT_SCALE = 4;   // = int(1.0f / VOXEL_SCALE)
@@ -15,10 +18,11 @@ constexpr int ATLAS_N = 4;
 constexpr int MAX_MATERIALS = ATLAS_N * ATLAS_N;
 
 // Block IDs you use now (extend as you grow)
-enum BlockId : uint16_t {
-    BLOCK_AIR = 0,
-    BLOCK_DEFAULT = 1,   // your default black
-    BLOCK_DIRT = 2,
-    BLOCK_GRASS = 3,
-    // ... add more as you map tiles
-}; 
+using BlockID = uint16_t;            // (or whatever you already use)
+static constexpr BlockID BLOCK_AIR = 0;
+static constexpr BlockID BLOCK_DIRT = 1;
+static constexpr BlockID BLOCK_GRASS = 2;
+static constexpr BlockID BLOCK_STONE = 3; // pick free IDs matching your atlas/materials
+static constexpr BlockID BLOCK_SAND = 4;
+static constexpr BlockID BLOCK_SNOW = 5;
+static constexpr BlockID BLOCK_WATER = 6;

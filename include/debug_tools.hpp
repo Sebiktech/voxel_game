@@ -48,7 +48,8 @@ struct ScopedGpuLabel {
 bool dbgImGuiInit(VulkanContext& ctx, GLFWwindow* win);
 void dbgImGuiNewFrame();
 void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s);
-void dbgImGuiShutdown(VulkanContext& ctx);
+void dbgImGuiShutdown();
+bool dbgImGuiReinit(VulkanContext& ctx, GLFWwindow* win);  // calls shutdown+init
 
 // fallback logging if no imgui:
 void dbgLogOnceBoot(const World& w);
