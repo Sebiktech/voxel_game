@@ -1245,7 +1245,7 @@ static uint32_t findMemoryTypeOrInvalid(VkPhysicalDevice pd, uint32_t typeBits, 
             return i;
     }
     return UINT32_MAX;
-}
+};
 
 bool createMaterialUBO(VulkanContext& ctx) {
     auto mats = buildDefaultMaterials();

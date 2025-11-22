@@ -2,6 +2,8 @@
 #include <iostream>
 #include <cstring>
 
+#include "settings.hpp"
+
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -189,6 +191,12 @@ void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s) {
     ImGui::Separator();
     ImGui::Text("Chunks: %u total  %u ready", s.chunksTotal, s.chunksReady);
     ImGui::Text("Tris:   %llu", (unsigned long long)s.tris);
+
+    ImGui::Separator();
+    ImGui::Text("Streaming");
+    ImGui::SliderInt("View Distance (chunks)", &gViewDist, 1, 8);
+    ImGui::SliderInt("Unload Slack", &gUnloadSlack, 0, 2);
+    // Changing the slider will automatically trigger the block above next frame
 
     static char pathBuf[256] = "saves/world.vwld";
     static std::string lastMsg;

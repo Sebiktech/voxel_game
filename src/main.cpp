@@ -28,6 +28,7 @@
 #include "world/world.hpp"
 #include "world/world_stream.hpp"
 #include "player.hpp"
+#include "settings.hpp"
 
 
 float pickMaxDist = 8.0f;
@@ -40,6 +41,40 @@ EditMode editMode = EditMode::Small;
 Player player;
 World world;
 static Audio gAudio;
+
+static int worldToChunkCoord(float w) {
+    int v = (int)std::floor(w);
+    int q = v / CHUNK_SIZE, r = v % CHUNK_SIZE;
+    if (r < 0) { r += CHUNK_SIZE; --q; }
+    return q;
+}
+
+// reacts to camera or view-distance changes
+static void streamTick(World& world, VulkanContext& ctx, const FPSCamera& cam) {
+    static int lastCx = INT_MAX, lastCz = INT_MAX, lastView = -1;
+
+    const int cx = worldToChunkCoord(cam.position.x);
+    const int cz = worldToChunkCoord(cam.position.z);
+
+    const bool moved = (cx != lastCx) || (cz != lastCz);
+    const bool viewChanged = (gViewDist != lastView);
+
+    if (!moved && !viewChanged) return;
+
+    printf("[Stream] center=(%d,%d) view=%d%s\n",
+        cx, cz, gViewDist, viewChanged ? " (changed)" : "");
+
+    // load  - only around camera
+    int created = streamEnsureAround(world, ctx, cx, cz, gViewDist);
+
+    // unload - everything beyond view + slack
+    int destroyed = streamUnloadFar(world, cx, cz, gViewDist + gUnloadSlack);
+
+    printf("[Stream] created=%d destroyed=%d loadedNow=%zu\n",
+        created, destroyed, world.map.size());
+
+    lastCx = cx; lastCz = cz; lastView = gViewDist;
+}
 
 std::vector<bool> regionDirty(REGION_COUNT, false);
 // CPU mesh cache per region
@@ -223,13 +258,17 @@ int main()
             };
 
         static int lastCamCx = 1e9, lastCamCz = 1e9;
+        static int lastView = -1;
+
         int camCx = worldToChunk(cam.position.x);
         int camCz = worldToChunk(cam.position.z);
 
-        if (camCx != lastCamCx || camCz != lastCamCz) {
-            streamEnsureAround(world, ctx, camCx, camCz, VIEW_DIST);
-            streamUnloadFar(world, camCx, camCz, VIEW_DIST);
+        if (camCx != lastCamCx || camCz != lastCamCz || gViewDist != lastView) {
+            streamEnsureAround(world, ctx, camCx, camCz, gViewDist);
+            streamUnloadFar(world, camCx, camCz, gViewDist + gUnloadSlack);
+
             lastCamCx = camCx; lastCamCz = camCz;
+            lastView = gViewDist;
         }
         //world.ensure(ctx, cx, cz, /*radius*/ 2); // 5x5 chunks
         worldUploadDirty(world, ctx);
@@ -361,6 +400,8 @@ int main()
                 }
                 pPrev = pNow;
             }
+
+            streamTick(world, ctx, cam);
 
             if (physicsMode) {
                 static bool spacePrev = false;

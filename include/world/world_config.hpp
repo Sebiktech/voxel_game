@@ -1,9 +1,6 @@
 #pragma once
 using BlockID = uint16_t;
 
-// how far we keep chunks around camera (in chunk units)
-static constexpr int VIEW_DIST = 5;   // draw/load radius (L? distance)
-
 // 0.5x voxel => na rovnakú fyzickú výšku treba 2× viac blokov
 constexpr float VOXEL_SCALE = 0.25f;
 constexpr int   VOXEL_HEIGHT_SCALE = 4;   // = int(1.0f / VOXEL_SCALE)
