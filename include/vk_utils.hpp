@@ -5,6 +5,8 @@
 #include <string>
 #include <optional>
 #include <functional>
+#include <deque>
+#include "lighting.hpp"
 #include "materials.hpp"
 
 #ifndef VK_CHECK
@@ -80,6 +82,10 @@ struct VulkanContext {
     VkPipeline voxelPipeline{};
     VkPipelineLayout voxelPipelineLayout{};
 
+    // --- Sky (fullscreen triangle) ---
+    VkPipeline       skyPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout skyPipelineLayout = VK_NULL_HANDLE;
+
     // Texture atlas resources
     uint32_t atlasWidth = 0;
     uint32_t atlasHeight = 0;
@@ -92,6 +98,13 @@ struct VulkanContext {
     VkDescriptorSetLayout descSetLayout{};
     VkDescriptorPool      descPool{};
     VkDescriptorSet       descSet{};
+
+    // UBO for lighting
+    VkBuffer       lightingUBO = VK_NULL_HANDLE;
+    VkDeviceMemory lightingUBOMemory = VK_NULL_HANDLE;
+    VkDeviceSize   lightingUBOSize = sizeof(LightingUBO);
+    // Persistently mapped pointer (optional but we’re using it)
+    void* lightingUBOPtr = nullptr;
 
     // materials UBO
     VkBuffer       materialUBO = {};
@@ -150,7 +163,10 @@ bool uploadVoxelMesh(VulkanContext& ctx, const std::vector<float>& verts,
 void destroyVoxelMesh(VulkanContext& ctx);
 
 bool createVoxelPipeline(VulkanContext& ctx, const std::string& shaderDir);
+bool createSkyPipeline(VulkanContext& ctx, const std::string& shaderDir);
 void destroyVoxelPipeline(VulkanContext& ctx);
+void destroySkyPipeline(VulkanContext& ctx);
+
 // Images & textures
 bool createImage(VulkanContext& ctx, uint32_t w, uint32_t h, VkFormat fmt, VkImageTiling tiling,
     VkImageUsageFlags usage, VkMemoryPropertyFlags props,
@@ -188,4 +204,16 @@ bool uploadRegionMesh(struct VulkanContext& ctx,
 void destroyRegionBuffers(struct VulkanContext& ctx, RegionGPU& rgn);
 
 bool createMaterialUBO(VulkanContext& ctx);
+// Creates the lighting UBO with initial values.
+bool createLightingUBO(VulkanContext& ctx);
 void destroyMaterialUBO(VulkanContext& ctx);
+
+// Map ? memcpy ? unmap (for HOST_VISIBLE buffers)
+bool updateBufferMapped(
+    VkDevice        device,
+    VkDeviceMemory  memory,
+    const void* data,
+    size_t          size,
+    size_t          offset = 0);
+
+// ring

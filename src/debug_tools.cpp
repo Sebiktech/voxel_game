@@ -226,6 +226,27 @@ void dbgImGuiDraw(VulkanContext& ctx, VkCommandBuffer cb, const DebugStats& s) {
     }
     if (!lastMsg.empty()) ImGui::TextWrapped("%s", lastMsg.c_str());
 
+    static glm::vec3 sunDir = glm::normalize(glm::vec3(0.3f, -1.0f, 0.2f));
+    static glm::vec3 sunCol = glm::vec3(1.0f, 0.95f, 0.85f);
+    static glm::vec3 ambient = glm::vec3(0.20f, 0.22f, 0.25f);
+
+    ImGui::SeparatorText("Lighting");
+    ImGui::DragFloat3("Sun Dir", &sunDir.x, 0.01f, -1.0f, 1.0f);
+    ImGui::ColorEdit3("Sun Color", &sunCol.x);
+    ImGui::ColorEdit3("Ambient", &ambient.x);
+
+    // re-normalize
+    if (glm::length(sunDir) < 1e-6f) sunDir = { 0, -1, 0 };
+    else sunDir = glm::normalize(sunDir);
+
+    // map to UBO and upload
+    LightingUBO u{};
+    u.sunDir = glm::vec4(sunDir, 0.0f);
+    u.sunColor = glm::vec4(sunCol, 0.0f);
+    u.ambient = glm::vec4(ambient, 0.0f);
+
+    updateBufferMapped(ctx.device, ctx.lightingUBOMemory, &u, sizeof(u));  // ? correct
+
     // === Window / Display ===
     static int modeIndex = 0; // 0=Windowed, 1=Borderless, 2=Exclusive
     static const char* modes[] = { "Windowed", "Borderless Fullscreen", "Exclusive Fullscreen" };

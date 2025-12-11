@@ -8,6 +8,30 @@
 static inline bool isAir(BlockID id) { return id == 0; }
 static inline bool isSolid(BlockID id) { return id != 0; }
 
+// --- Ambient Occlusion helpers ---
+static inline int occ(const Chunk& c, int x, int y, int z) {
+    // solid? adapt if your "air" id differs
+    return c.get(x, y, z) != BLOCK_AIR;
+}
+
+// Bounds-safe occupancy for AO
+static inline int occSafe(const Chunk& c, int x, int y, int z) {
+    if (x < 0 || y < 0 || z < 0 ||
+        x >= CHUNK_SIZE || y >= CHUNK_HEIGHT || z >= CHUNK_SIZE) return 0;
+    return c.get(x, y, z) != BLOCK_AIR;
+}
+
+// Map 0..3 occluders ? AO factor (tweak to taste)
+static inline float aoFactor(int side1, int side2, int corner) {
+    const int n = side1 + side2 + corner;
+    switch (n) {
+    case 0: return 1.00f;
+    case 1: return 0.80f;
+    case 2: return 0.60f;
+    default:return 0.45f;
+    }
+}
+
 static inline void tileToUV(float tx, float ty, float& u, float& v) {
     u = tx / ATLAS_N; v = ty / ATLAS_N;
 }
@@ -34,34 +58,70 @@ static inline void pickTile(BlockID id, int /*faceDir*/, int /*axis*/, float& ti
 
 // Vypíše jeden ve?ký obd?žnik (du x dv voxelov) na „hranici“ slice-u k.
 // Pozície sedia s tvojím starým +/-0.5 layoutom.
-static inline void emitQuad(class MeshData& m,
+static inline void emitQuad(class MeshData& m, const Chunk& chunk,
     int axis, int faceDir,        // 0=x,1=y,2=z ; +1/-1
-    int k,                        // slice index (medzi k-1 a k)
-    int i0, int j0,               // za?iatok v rovine (u,v)
-    int du, int dv,               // šírka/výška v voxeloch
+    int k,                        // slice index (between k-1 and k)
+    int i0, int j0,               // start in plane (u,v)
+    int du, int dv,               // width/height in voxels
     float tileU, float tileV)
 {
     static constexpr float VOXEL_SCALE = 0.25f;
-    constexpr int   VOXEL_HEIGHT_SCALE = 2;   // = int(1.0f / VOXEL_SCALE)
 
-    // osi v rovine
+    // In-plane axes
     int u = (axis + 1) % 3;
     int v = (axis + 2) % 3;
 
-    // pomocné pre rohy (0..du, 0..dv)
-    int ij[4][2] = { {0,0},{0,dv},{du,dv},{du,0} };
+    // Index of the "solid" layer along the slicing axis (see how faceDir is chosen in your mask)
+    const int solidLayer = (faceDir > 0) ? (k - 1) : (k);
 
-    // pevná súradnica roviny (vždy k - 0.5 na hranici medzi k-1 a k)
+    // Helper to translate (iu,iv,axisLayer) into (x,y,z)
+    auto pack = [&](int iu, int iv, int axVal, int& X, int& Y, int& Z) {
+        int a[3]; a[axis] = axVal; a[u] = iu; a[v] = iv; X = a[0]; Y = a[1]; Z = a[2];
+        };
+
+    // AO for a corner: look at two orthogonal neighbors + the diagonal on the SOLID side
+    auto cornerAO = [&](int iu0, int iv0, int duSign, int dvSign)->float {
+        int Xs, Ys, Zs;
+        int s1x, s1y, s1z; // neighbor along +/?u
+        int s2x, s2y, s2z; // neighbor along +/?v
+        int crx, cry, crz; // diagonal (+/?u, +/?v)
+
+        pack(iu0, iv0, solidLayer, Xs, Ys, Zs);
+        pack(iu0 + duSign, iv0, solidLayer, s1x, s1y, s1z);
+        pack(iu0, iv0 + dvSign, solidLayer, s2x, s2y, s2z);
+        pack(iu0 + duSign, iv0 + dvSign, solidLayer, crx, cry, crz);
+
+        int s1 = occSafe(chunk, s1x, s1y, s1z);
+        int s2 = occSafe(chunk, s2x, s2y, s2z);
+        int cr = occSafe(chunk, crx, cry, crz);
+        // Map 0..3 occluders ? AO factor (reuse your aoFactor)
+        return aoFactor(s1, s2, cr);
+        };
+
+    // AO for the 4 quad corners (match the same corner order as ij[])
+    // ij[] = { {0,0}, {0,dv}, {du,dv}, {du,0} }
+    float ao00 = cornerAO(i0, j0, -1, -1); // (0,0)   bottom-left
+    float ao0V = cornerAO(i0, j0 + dv - 1, -1, +1); // (0,dv)  top-left
+    float aoUV = cornerAO(i0 + du - 1, j0 + dv - 1, +1, +1); // (du,dv) top-right
+    float aoU0 = cornerAO(i0 + du - 1, j0, +1, -1); // (du,0)  bottom-right
+
+    // Map those AO values to the vertex emit order
+    float aoCorner[4] = { ao00, ao0V, aoUV, aoU0 };
+
+    // Fixed plane coordinate at the face
     const float plane = ((float)k - 0.5f) * VOXEL_SCALE;
 
-    // normála
+    // Normal
     float nx = 0, ny = 0, nz = 0;
     if (axis == 0) nx = (float)faceDir;
     else if (axis == 1) ny = (float)faceDir;
     else nz = (float)faceDir;
 
-    // 4 vrcholy: pos3 normal3 uv2 tile2
-    uint32_t base = static_cast<uint32_t>(m.vertices.size() / 10);
+    // corner offsets
+    int ij[4][2] = { {0,0},{0,dv},{du,dv},{du,0} };
+
+    // 4 vertices: pos3 normal3 uv2 tile2 + AO(1) => 11 floats
+    uint32_t base = static_cast<uint32_t>(m.vertices.size() / 11);
     for (int idx = 0; idx < 4; ++idx) {
         int offU = ij[idx][0];
         int offV = ij[idx][1];
@@ -79,15 +139,17 @@ static inline void emitQuad(class MeshData& m,
         m.vertices.push_back(nx);
         m.vertices.push_back(ny);
         m.vertices.push_back(nz);
-        // uv: v „voxel“ jednotkách -> 0..du, 0..dv (opakujeme textúru)
+        // uv in voxel units (0..du, 0..dv)
         m.vertices.push_back((float)offU);
         m.vertices.push_back((float)offV);
-        // tile offset
+        // tile offset (atlas cell)
         m.vertices.push_back(tileU);
         m.vertices.push_back(tileV);
+        // NEW: AO
+        m.vertices.push_back(aoCorner[idx]);
     }
 
-    // Winding: pre +faces CCW (0,1,2, 0,2,3), pre -faces prehodíme
+    // indices (same winding you already had)
     if (faceDir > 0) {
         m.indices.push_back(base + 0); m.indices.push_back(base + 1); m.indices.push_back(base + 2);
         m.indices.push_back(base + 0); m.indices.push_back(base + 2); m.indices.push_back(base + 3);
@@ -167,7 +229,7 @@ MeshData meshChunk(const Chunk& c) {
                     // emitni quad (i,j) .. (i+w,j+h) na slice k
                     float tileU, tileV;
                     pickTile(m0.id, m0.faceDir, axis, tileU, tileV);
-                    emitQuad(out, axis, m0.faceDir, k, i, j, w, h, tileU, tileV);
+                    emitQuad(out, c, axis, m0.faceDir, k, i, j, w, h, tileU, tileV);
 
                     // vy?isti použitú oblas? v maske
                     for (int y = 0; y < h; ++y)
@@ -193,7 +255,7 @@ MeshData meshChunkAt(const Chunk& c, int cx, int cy, int cz)
     const float zOff = float(cz * CHUNK_SIZE) * VOXEL_SCALE;
 
     // add offset to every vertex position
-    for (size_t i = 0; i + 2 < m.vertices.size(); i += 10) {
+    for (size_t i = 0; i + 2 < m.vertices.size(); i += 11) {
         m.vertices[i + 0] += xOff; // x
         m.vertices[i + 1] += yOff; // y
         m.vertices[i + 2] += zOff; // z
@@ -289,7 +351,7 @@ MeshData meshChunkRegion(const Chunk& c, int x0, int y0, int z0, int x1, int y1,
 
                     int i0_abs = u0 + i;
                     int j0_abs = v0 + j;
-                    emitQuad(out, axis, m0.faceDir, k, i0_abs, j0_abs, w, h, tileU, tileV);
+                    emitQuad(out, c, axis, m0.faceDir, k, i0_abs, j0_abs, w, h, tileU, tileV);
 
                     // clear mask block
                     for (int y = 0; y < h; ++y)

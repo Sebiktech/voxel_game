@@ -2,6 +2,67 @@
 #include <algorithm>
 #include <cmath>
 
+// ===== OPTIONAL: DEFINE WORLD BOUNDARIES =====
+// Comment out these defines for infinite world
+#define WORLD_BOUNDARY_ENABLED
+#define WORLD_MIN_CHUNK_X -30
+#define WORLD_MAX_CHUNK_X 30
+#define WORLD_MIN_CHUNK_Z -30
+#define WORLD_MAX_CHUNK_Z 30
+
+#ifdef WORLD_BOUNDARY_ENABLED
+// Convert chunk boundaries to world space boundaries
+static constexpr float WORLD_MIN_X = WORLD_MIN_CHUNK_X * CHUNK_SIZE * VOXEL_SCALE;
+static constexpr float WORLD_MAX_X = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE * VOXEL_SCALE;
+static constexpr float WORLD_MIN_Z = WORLD_MIN_CHUNK_Z * CHUNK_SIZE * VOXEL_SCALE;
+static constexpr float WORLD_MAX_Z = (WORLD_MAX_CHUNK_Z + 1) * CHUNK_SIZE * VOXEL_SCALE;
+static constexpr float BOUNDARY_MARGIN = 1.0f * VOXEL_SCALE; // 1 voxel margin
+#endif
+
+// Add this method to your Player class (or as a free function)
+void clampPlayerToWorldBounds(Player& player) {
+#ifdef WORLD_BOUNDARY_ENABLED
+    bool hitBoundary = false;
+
+    // X axis
+    if (player.pos.x < WORLD_MIN_X + BOUNDARY_MARGIN) {
+        player.pos.x = WORLD_MIN_X + BOUNDARY_MARGIN;
+        if (player.vel.x < 0.0f) {
+            player.vel.x = 0.0f;
+            hitBoundary = true;
+        }
+    }
+    if (player.pos.x > WORLD_MAX_X - BOUNDARY_MARGIN) {
+        player.pos.x = WORLD_MAX_X - BOUNDARY_MARGIN;
+        if (player.vel.x > 0.0f) {
+            player.vel.x = 0.0f;
+            hitBoundary = true;
+        }
+    }
+
+    // Z axis
+    if (player.pos.z < WORLD_MIN_Z + BOUNDARY_MARGIN) {
+        player.pos.z = WORLD_MIN_Z + BOUNDARY_MARGIN;
+        if (player.vel.z < 0.0f) {
+            player.vel.z = 0.0f;
+            hitBoundary = true;
+        }
+    }
+    if (player.pos.z > WORLD_MAX_Z - BOUNDARY_MARGIN) {
+        player.pos.z = WORLD_MAX_Z - BOUNDARY_MARGIN;
+        if (player.vel.z > 0.0f) {
+            player.vel.z = 0.0f;
+            hitBoundary = true;
+        }
+    }
+
+    if (hitBoundary) {
+        // Optional: Play a "hit wall" sound or show warning
+        // printf("[Player] Hit world boundary\n");
+    }
+#endif
+}
+
 // world?voxel index
 static inline void worldToVoxel(const glm::vec3& w, int& x, int& y, int& z) {
     x = (int)std::floor(w.x / VOXEL_SCALE + 0.5f);

@@ -228,8 +228,8 @@ bool recordCommandBuffers(VulkanContext& ctx, float r, float g, float b, const f
         // 3) push constants: mat4 (64B) + atlasScale(2) + atlasOffset(2) = 80B
         float pcData[20];
         memcpy(pcData, mvp, sizeof(float) * 16);
-        pcData[16] = 1.0f / 4.0f;                // atlasScale.x
-        pcData[17] = 1.0f / 4.0f;                // atlasScale.y
+        pcData[16] = 1.0f / ATLAS_N;                // atlasScale.x
+        pcData[17] = 1.0f / ATLAS_N;                // atlasScale.y
         pcData[18] = 1.0f / ctx.atlasWidth;      // atlasTexel.x  (add these two!)
         pcData[19] = 1.0f / ctx.atlasHeight;     // atlasTexel.y
 
@@ -806,23 +806,32 @@ bool createVoxelPipeline(VulkanContext& ctx, const std::string& shaderDir) {
     fs.stage = VK_SHADER_STAGE_FRAGMENT_BIT; fs.module = fmod; fs.pName = "main";
     VkPipelineShaderStageCreateInfo stages[] = { vs, fs };
 
-    // binding 0: pos3 normal3 uv2 tile2  => 10 floats
-    VkVertexInputBindingDescription bind{};
-    bind.binding = 0; bind.stride = sizeof(float) * 10; bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // ---- Vertex layout: 11 floats per vertex ----
+// layout:
+// loc0: position (vec3)   @ offset  0 * 4
+// loc1: normal   (vec3)   @ offset  3 * 4
+// loc2: uv       (vec2)   @ offset  6 * 4
+// loc3: tile     (vec2)   @ offset  8 * 4
+// loc4: ao       (float)  @ offset 10 * 4
+    const uint32_t kStrideFloats = 11;
 
-    VkVertexInputAttributeDescription attrs[4]{};
-    // location 0: pos
-    attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
-    // location 1: normal
-    attrs[1] = { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3 };
-    // location 2: uv
-    attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT,     sizeof(float) * 6 };
-    // location 3: tile offset (tx/N, ty/N)
-    attrs[3] = { 3, 0, VK_FORMAT_R32G32_SFLOAT,     sizeof(float) * 8 };
+    VkVertexInputBindingDescription bind{};
+    bind.binding = 0;
+    bind.stride = kStrideFloats * sizeof(float);
+    bind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+
+    std::array<VkVertexInputAttributeDescription, 5> attrs{};
+    attrs[0] = { 0,0,VK_FORMAT_R32G32B32_SFLOAT, 0 * sizeof(float) };  // pos
+    attrs[1] = { 1,0,VK_FORMAT_R32G32B32_SFLOAT, 3 * sizeof(float) };  // normal
+    attrs[2] = { 2,0,VK_FORMAT_R32G32_SFLOAT,    6 * sizeof(float) };  // uv
+    attrs[3] = { 3,0,VK_FORMAT_R32G32_SFLOAT,    8 * sizeof(float) };  // tile
+    attrs[4] = { 4,0,VK_FORMAT_R32_SFLOAT,      10 * sizeof(float) };  // ao
 
     VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
-    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bind;
-    vi.vertexAttributeDescriptionCount = 4; vi.pVertexAttributeDescriptions = attrs;
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &bind;
+    vi.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrs.size());
+    vi.pVertexAttributeDescriptions = attrs.data();
 
     VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
     ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -908,6 +917,90 @@ void destroyVoxelPipeline(VulkanContext& ctx) {
     if (ctx.voxelPipeline) { vkDestroyPipeline(ctx.device, ctx.voxelPipeline, nullptr); ctx.voxelPipeline = VK_NULL_HANDLE; }
     if (ctx.voxelPipelineLayout) { vkDestroyPipelineLayout(ctx.device, ctx.voxelPipelineLayout, nullptr); ctx.voxelPipelineLayout = VK_NULL_HANDLE; }
 }
+
+// vk_utils.cpp
+bool createSkyPipeline(VulkanContext& ctx, const std::string& shaderDir)
+{
+    auto vert = readFile(shaderDir + "/voxel.vert.spv");
+    auto frag = readFile(shaderDir + "/voxel.frag.spv");
+    VkShaderModule vmod = createShaderModule(ctx.device, vert);
+    VkShaderModule fmod = createShaderModule(ctx.device, frag);
+
+    if (!vmod || !fmod) return false;
+
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr,0,
+                  VK_SHADER_STAGE_VERTEX_BIT,   vmod, "main", nullptr };
+    stages[1] = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr,0,
+                  VK_SHADER_STAGE_FRAGMENT_BIT, fmod, "main", nullptr };
+
+    // No vertex input
+    VkPipelineVertexInputStateCreateInfo vi{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+
+    VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkViewport vp{ 0,0, (float)ctx.swapchainExtent.width, (float)ctx.swapchainExtent.height, 0.0f, 1.0f };
+    VkRect2D sc{ {0,0}, ctx.swapchainExtent };
+    VkPipelineViewportStateCreateInfo vpci{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    vpci.viewportCount = 1; vpci.pViewports = &vp;
+    vpci.scissorCount = 1; vpci.pScissors = &sc;
+
+    VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rs.polygonMode = VK_POLYGON_MODE_FILL;
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.lineWidth = 1.0f;
+
+    // Depth OFF (we want the sky behind everything)
+    VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    ds.depthTestEnable = VK_FALSE;
+    ds.depthWriteEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState cbA{};
+    cbA.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    cb.attachmentCount = 1; cb.pAttachments = &cbA;
+
+    // Push-constant range for SkyPC (size = 16*4 bytes)
+    struct SkyPC { glm::vec3 camF; float tanHalfFov; glm::vec3 camR; float aspect; glm::vec3 camU; float time; glm::vec3 sunDir; float sunAngle; glm::vec3 sunColor; float _pad0; glm::vec3 skyBase; float _pad1; };
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    pcr.offset = 0;
+    pcr.size = sizeof(SkyPC);
+
+    VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
+    VK_CHECK(vkCreatePipelineLayout(ctx.device, &plci, nullptr, &ctx.skyPipelineLayout));
+
+    VkGraphicsPipelineCreateInfo gp{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    gp.stageCount = 2; gp.pStages = stages;
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vpci;
+    gp.pRasterizationState = &rs;
+    gp.pMultisampleState = &ms;
+    gp.pDepthStencilState = &ds;
+    gp.pColorBlendState = &cb;
+    gp.layout = ctx.skyPipelineLayout;
+    gp.renderPass = ctx.renderPass;     // same subpass as world
+    gp.subpass = 0;
+
+    VK_CHECK(vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1, &gp, nullptr, &ctx.skyPipeline));
+
+    vkDestroyShaderModule(ctx.device, fmod, nullptr);
+    vkDestroyShaderModule(ctx.device, vmod, nullptr);
+    return true;
+}
+
+void destroySkyPipeline(VulkanContext& ctx) {
+    if (ctx.skyPipeline) { vkDestroyPipeline(ctx.device, ctx.skyPipeline, nullptr); ctx.skyPipeline = VK_NULL_HANDLE; }
+    if (ctx.skyPipelineLayout) { vkDestroyPipelineLayout(ctx.device, ctx.skyPipelineLayout, nullptr); ctx.skyPipelineLayout = VK_NULL_HANDLE; }
+} 
 
 bool createImage(VulkanContext& ctx, uint32_t w, uint32_t h, VkFormat fmt, VkImageTiling tiling,
     VkImageUsageFlags usage, VkMemoryPropertyFlags props,
@@ -1209,9 +1302,9 @@ bool createTextureAtlasFromFile(VulkanContext& ctx, const char* path) {
 
     // sampler: trilinear + (optional) anisotropy
     VkSamplerCreateInfo si{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    si.magFilter = VK_FILTER_LINEAR;
-    si.minFilter = VK_FILTER_LINEAR;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    si.magFilter = VK_FILTER_NEAREST;
+    si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -1246,6 +1339,35 @@ static uint32_t findMemoryTypeOrInvalid(VkPhysicalDevice pd, uint32_t typeBits, 
     }
     return UINT32_MAX;
 };
+
+bool createLightingUBO(VulkanContext& ctx) {
+    ctx.lightingUBOSize = sizeof(LightingUBO);
+
+    // 1) Create host-visible, coherent UBO
+    if (!createBuffer(ctx,
+        ctx.lightingUBOSize,                         // size (VkDeviceSize) — not a pointer!
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,          // usage
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,        // props
+        ctx.lightingUBO,
+        ctx.lightingUBOMemory))
+    {
+        return false;
+    }
+
+    // 2) Write initial lighting values
+    LightingUBO init{};
+    init.sunDir = { 0.3f, -1.0f, 0.2f, 0.0f };
+    init.sunColor = { 1.0f, 0.95f, 0.85f, 0.0f };
+    init.ambient = { 0.20f, 0.22f, 0.25f, 0.0f };
+
+    void* dst = nullptr;
+    VK_CHECK(vkMapMemory(ctx.device, ctx.lightingUBOMemory, 0, ctx.lightingUBOSize, 0, &dst));
+    std::memcpy(dst, &init, sizeof(init));
+    vkUnmapMemory(ctx.device, ctx.lightingUBOMemory);
+
+    return true;
+}
 
 bool createMaterialUBO(VulkanContext& ctx) {
     auto mats = buildDefaultMaterials();
@@ -1409,14 +1531,15 @@ bool createDescriptors(VulkanContext& ctx) {
         ctx.descPool = VK_NULL_HANDLE;
     }
 
-    VkDescriptorPoolSize sizes[2]{};
+    VkDescriptorPoolSize sizes[3]{};
     sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sizes[0].descriptorCount = 4;
     sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         sizes[1].descriptorCount = 4;
+    sizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;         sizes[2].descriptorCount = 4;
 
     VkDescriptorPoolCreateInfo dp{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
     dp.flags = 0;                // don’t set FREE_DESCRIPTOR_SET_BIT unless you really free sets
     dp.maxSets = 4;
-    dp.poolSizeCount = 2;
+    dp.poolSizeCount = 3;
     dp.pPoolSizes = sizes;
 
     if (vkCreateDescriptorPool(ctx.device, &dp, nullptr, &ctx.descPool) != VK_SUCCESS) {
@@ -1435,9 +1558,14 @@ bool createDescriptors(VulkanContext& ctx) {
     b1.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     b1.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
-    VkDescriptorSetLayoutBinding bindings[2] = { b0, b1 };
+    VkDescriptorSetLayoutBinding b2{};
+    b2.binding = 2; b2.descriptorCount = 1;
+    b2.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    b2.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    VkDescriptorSetLayoutBinding bindings[3] = { b0, b1, b2 };
     VkDescriptorSetLayoutCreateInfo lci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-    lci.bindingCount = 2;
+    lci.bindingCount = 3;
     lci.pBindings = bindings;
 
     if (vkCreateDescriptorSetLayout(ctx.device, &lci, nullptr, &ctx.descSetLayout) != VK_SUCCESS) {
@@ -1467,12 +1595,17 @@ bool createDescriptors(VulkanContext& ctx) {
     ii.imageView = ctx.atlasView;
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    VkDescriptorBufferInfo ubo{};
-    ubo.buffer = ctx.materialUBO;
-    ubo.offset = 0;
-    ubo.range = ctx.materialUBOSize ? ctx.materialUBOSize : sizeof(Material);
+    VkDescriptorBufferInfo uboMat{};
+    uboMat.buffer = ctx.materialUBO;
+    uboMat.offset = 0;
+    uboMat.range = ctx.materialUBOSize ? ctx.materialUBOSize : sizeof(Material);
 
-    VkWriteDescriptorSet writes[2]{};
+    VkDescriptorBufferInfo uboLight{};
+    uboLight.buffer = ctx.lightingUBO;
+    uboLight.offset = 0;
+    uboLight.range = ctx.lightingUBOSize;
+
+    VkWriteDescriptorSet writes[3]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = ctx.descSet;
     writes[0].dstBinding = 0;
@@ -1485,9 +1618,16 @@ bool createDescriptors(VulkanContext& ctx) {
     writes[1].dstBinding = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     writes[1].descriptorCount = 1;
-    writes[1].pBufferInfo = &ubo;
+    writes[1].pBufferInfo = &uboMat;
 
-    vkUpdateDescriptorSets(ctx.device, 2, writes, 0, nullptr);
+    VkWriteDescriptorSet w2{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    writes[2].dstSet = ctx.descSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    writes[2].descriptorCount = 1;
+    writes[2].pBufferInfo = &uboLight;
+
+    vkUpdateDescriptorSets(ctx.device, 3, writes, 0, nullptr);
     return true;
 }
 
@@ -1735,4 +1875,19 @@ void destroyMaterialUBO(VulkanContext& ctx) {
     if (ctx.materialUBOMem) { vkFreeMemory(ctx.device, ctx.materialUBOMem, nullptr); ctx.materialUBOMem = VK_NULL_HANDLE; }
     if (ctx.materialUBO) { vkDestroyBuffer(ctx.device, ctx.materialUBO, nullptr); ctx.materialUBO = VK_NULL_HANDLE; }
     ctx.materialUBOSize = 0;
+}
+
+bool updateBufferMapped(VkDevice device,
+    VkDeviceMemory memory,
+    const void* data,
+    size_t size,
+    size_t offset)
+{
+    if (!data || size == 0) return false;
+    void* dst = nullptr;
+    VkResult res = vkMapMemory(device, memory, (VkDeviceSize)offset, (VkDeviceSize)size, 0, &dst);
+    if (res != VK_SUCCESS) return false;
+    std::memcpy(dst, data, size);
+    vkUnmapMemory(device, memory);
+    return true;
 }

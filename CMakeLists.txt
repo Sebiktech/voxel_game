@@ -73,6 +73,22 @@ add_executable(voxel_game
 target_include_directories(voxel_game PRIVATE ${INCLUDE_DIR})
 target_link_libraries(voxel_game PRIVATE glfw Vulkan::Vulkan glm::glm imgui_glfw_vulkan)
 
+# CMakeLists.txt – after you define your target
+add_custom_target(gen_atlas ALL
+    COMMAND ${CMAKE_COMMAND} -E echo "Generating atlas..."
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/make_atlas.py
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/build_assets/atlas_32px_8x8.png
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_dependencies(${PROJECT_NAME} gen_atlas)
+
+# Copy to run dir
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/build_assets/atlas_32px_8x8.png
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>/assets/atlas.png)
+
 # VS filters
 source_group(TREE ${SRC_DIR}     PREFIX "Source Files" FILES ${SRC_FILES})
 source_group(TREE ${INCLUDE_DIR} PREFIX "Header Files" FILES ${HDR_FILES})

@@ -38,9 +38,16 @@ static bool g_escWasDown = false;
 //static Input input;
 static DebugStats debugStats;
 EditMode editMode = EditMode::Small;
+FPSCamera cam;
 Player player;
 World world;
+VulkanContext ctx{};
 static Audio gAudio;
+
+static int   afIndex = 0;
+static bool  fWasDown = false;                            // edge detector
+static bool  f3WasDown = false;
+int currentMaterial = 1;
 
 static int worldToChunkCoord(float w) {
     int v = (int)std::floor(w);
@@ -65,10 +72,10 @@ static void streamTick(World& world, VulkanContext& ctx, const FPSCamera& cam) {
         cx, cz, gViewDist, viewChanged ? " (changed)" : "");
 
     // load  - only around camera
-    int created = streamEnsureAround(world, ctx, cx, cz, gViewDist);
+    int created = streamEnsureAround(world, ctx, cx, cz, world.stream.viewRadius);
 
     // unload - everything beyond view + slack
-    int destroyed = streamUnloadFar(world, cx, cz, gViewDist + gUnloadSlack);
+    int destroyed = streamUnloadFar(world, cx, cz, world.stream.keepRadius);
 
     printf("[Stream] created=%d destroyed=%d loadedNow=%zu\n",
         created, destroyed, world.map.size());
@@ -116,6 +123,261 @@ static void framebufferResizeCallback(GLFWwindow* win, int width, int height) {
 static double g_scrollY = 0.0;
 static void scroll_cb(GLFWwindow*, double /*xoff*/, double yoff) { g_scrollY += yoff; }
 
+void initGame() {
+    // Set view distance from settings
+    gViewDist = 5;      // Load chunks within 8 chunks (17x17 grid)
+    gUnloadSlack = 0;   // Keep chunks up to 10 chunks away before unloading
+
+    // Initialize world
+    world.seed = 12345;
+
+    // Set player spawn position (in world space)
+    // If you want to spawn at voxel (0, 64, 0):
+    // world_pos = voxel * VOXEL_SCALE = (0, 64, 0) * 0.25 = (0, 16, 0)
+    player.pos = glm::vec3(0.0f, 16.0f, 0.0f); // 64 voxels high
+    player.vel = glm::vec3(0.0f);
+
+    // Initialize camera at player position
+    cam.position = player.camPosition();
+
+    // Pre-load initial chunks around spawn
+    printf("Pre-loading initial chunks...\n");
+    const int vx = (int)std::floor(player.pos.x / VOXEL_SCALE + 0.5f);
+    const int vz = (int)std::floor(player.pos.z / VOXEL_SCALE + 0.5f);
+
+    auto floordiv = [](int a, int b) -> int {
+        int q = a / b;
+        int r = a % b;
+        return (r && ((r < 0) != (b < 0))) ? (q - 1) : q;
+        };
+
+    const int spawnCx = floordiv(vx, CHUNK_SIZE);
+    const int spawnCz = floordiv(vz, CHUNK_SIZE);
+
+    printf("Spawn at chunk (%d, %d)\n", spawnCx, spawnCz);
+    int loaded = streamEnsureAround(world, ctx, spawnCx, spawnCz, gViewDist);
+    printf("Pre-loaded %d chunks\n", loaded);
+
+    // Wait for GPU uploads
+    vkDeviceWaitIdle(ctx.device);
+}
+
+void updateGame(GLFWwindow* window, float deltaTime) {
+    ImGuiIO& io = ImGui::GetIO();
+
+    // Block gameplay input if:
+    //  - you're in UI mode (Esc toggled), OR
+    //  - ImGui wants the device (hovering widgets, active text box, etc.)
+    const bool blockMouse = g_uiMode || io.WantCaptureMouse;
+    const bool blockKeys = g_uiMode || io.WantCaptureKeyboard;
+
+    // 1. Update camera from input
+    if (!blockMouse) cam.handleMouse(window);
+    if (!blockKeys) cam.handleKeys(window, deltaTime);
+
+    // 2. Get movement direction from camera (for player physics)
+    glm::vec3 wishDir = glm::vec3(0.0f);
+    if (player.physicsEnabled) {
+        // Convert camera-relative WASD to world direction
+        if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wishDir += cam.forward();
+        if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wishDir -= cam.forward();
+        if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wishDir += cam.right();
+        if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wishDir -= cam.right();
+
+        // Flatten to XZ plane for ground movement
+        wishDir.y = 0.0f;
+        if (glm::length(wishDir) > 0.0f) {
+            wishDir = glm::normalize(wishDir);
+        }
+
+        // Jump
+        if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && player.onGround) {
+            player.vel.y = player.p.jumpSpeed;
+        }
+    }
+
+    // 3. Update player physics
+    player.simulate(world, wishDir, deltaTime);
+
+    // 4. Sync camera to player
+    if (player.physicsEnabled) {
+        cam.position = player.camPosition();
+    }
+
+    if (physicsMode) {
+        static bool spacePrev = false;
+        bool space = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
+        if (space && !spacePrev && player.onGround) {
+            player.vel.y = player.p.jumpSpeed;
+            player.onGround = false;
+        }
+        spacePrev = space;
+    }
+
+
+    glm::vec3 wish(0.0f);
+
+    if (!blockKeys)
+    {
+        if (physicsMode) {
+            cam.position = player.camPosition();  // camera follows player head
+            // keep your existing cam yaw/pitch handling (mouse) for look
+        }
+        else {
+            // your existing free-fly camera movement (use wish & keys to move cam directly)
+            float flySpeed = 8.0f;
+            float stepAmount = flySpeed * deltaTime;   // both floats
+            cam.position += wish * stepAmount;
+            if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) cam.position.y += flySpeed * deltaTime;
+            if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) cam.position.y -= flySpeed * deltaTime;
+        }
+    }
+
+    // 5. *** CRITICAL: Update chunk streaming based on player position ***
+    worldStreamTick(world, ctx, player.pos, cam.forward());
+
+    // 6. Other game logic (raycast for block editing, etc.)
+
+    // Toggle F3 overlay (edge-triggered)
+    static bool f3WasDown = false;                // persist across frames
+    int f3State = glfwGetKey(window, GLFW_KEY_F3);
+    if (f3State == GLFW_PRESS && !f3WasDown) {    // rising edge
+        debugStats.overlay = !debugStats.overlay;
+    }
+    f3WasDown = (f3State == GLFW_PRESS);
+
+    // Toggle anisotropic filtering level
+    int fState = glfwGetKey(window, GLFW_KEY_F);
+    if (fState == GLFW_PRESS && !fWasDown) {
+        // rising edge
+        const float LEVELS[] = { 1.0f, 4.0f, 8.0f, 16.0f };
+        afIndex = (afIndex + 1) % (int)(sizeof(LEVELS) / sizeof(LEVELS[0]));
+
+        float target = LEVELS[afIndex];
+        if (!ctx.anisotropyFeature) target = 1.0f;
+        target = std::min(target, ctx.maxSamplerAnisotropy);
+
+        if (!recreateAtlasSampler(ctx, target)) {
+            std::cerr << "[VK] Recreate sampler failed\n";
+        }
+        else {
+            std::cerr << "[VK] AF set to " << target << "x\n";
+        }
+    }
+    fWasDown = (fState == GLFW_PRESS);
+
+    // Toggle physics mode
+    static bool pPrev = false;
+    bool pNow = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
+    if (pNow && !pPrev) {
+        physicsMode = !physicsMode;
+        player.physicsEnabled = physicsMode;
+        std::cerr << "[Player] physics " << (physicsMode ? "ON" : "OFF") << "\n";
+        // sync camera to player or vice versa on toggle
+        if (physicsMode) {
+            // put player under camera
+            player.pos = cam.position - glm::vec3(0, player.p.eyeOffset, 0);
+            player.vel = glm::vec3(0);
+        }
+        else {
+            // put camera at player eye
+            cam.position = player.camPosition();
+        }
+    }
+    pPrev = pNow;
+
+    // Toggle world edit mode
+    static bool bWasDown = false;
+    int bState = glfwGetKey(window, GLFW_KEY_B);
+    if (bState == GLFW_PRESS && !bWasDown) {
+        editMode = (editMode == EditMode::Small) ? EditMode::Big : EditMode::Small;
+        std::cerr << "[EDIT] mode = " << (editMode == EditMode::Small ? "Small" : "Big") << "\n";
+    }
+    bWasDown = (bState == GLFW_PRESS);
+
+    auto clampMat = [&](int m) {
+        if (m < 1) m = MAX_MATERIALS - 1;                 // wrap
+        if (m >= MAX_MATERIALS) m = 1;                    // wrap
+        return m;
+        };
+
+    if (g_scrollY != 0.0) {
+        int steps = (g_scrollY > 0.0) ? 1 : -1;
+        currentMaterial = clampMat(currentMaterial + steps);
+        g_scrollY = 0.0;
+
+        char title[256];
+        std::snprintf(title, sizeof(title), "VoxelGame | Mat:%d", currentMaterial);
+        glfwSetWindowTitle(window, title);
+    }
+
+    // --- UI focus toggle with ESC ---
+    int esc = glfwGetKey(window, GLFW_KEY_ESCAPE);
+    if (esc == GLFW_PRESS && !g_escWasDown) {
+        g_uiMode = !g_uiMode;
+        std::cout << g_uiMode;
+
+        // capture or release cursor for your FPS camera
+        cam.setCursorCaptured(window, !g_uiMode); // true = lock/hide, false = free cursor
+
+        // hard refocus the window (important after fullscreen switches)
+        glfwFocusWindow(window);
+        //ImGui::ClearActiveID();
+    }
+    g_escWasDown = (esc == GLFW_PRESS);
+
+    if (!blockKeys)
+    {
+
+        static bool lWasDown = false, rWasDown = false;
+        int l = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
+        int r = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
+
+        if ((l == GLFW_PRESS && !lWasDown) || (r == GLFW_PRESS && !rWasDown)) {
+            // z kamery
+            glm::vec3 p = cam.position;          // public field v tvojej FPSCamera
+            glm::vec3 dir = cam.forward();    // smer poh?adu
+            // else:
+            float cy = glm::radians(cam.yaw), cp = glm::radians(cam.pitch);
+            glm::vec3 dir2 = glm::normalize(glm::vec3(std::cos(cp) * std::cos(cy),
+                std::sin(cp),
+                std::cos(cp) * std::sin(cy)));
+
+            RayHit hit = raycastWorld(world, cam.position, dir /*or dir2*/, pickMaxDist);
+            if (hit.hit) {
+                bool changed = false;
+
+                if (l == GLFW_PRESS && !lWasDown) {
+                    // remove the hit voxel (Small/Big depends on editMode)
+                    changed |= worldEditSet(world, hit.vx, hit.vy, hit.vz, 0, editMode);
+                }
+                if (r == GLFW_PRESS && !rWasDown) {
+                    // place next to the face we hit (use entry cell or normal offset)
+                    int px = hit.vx + hit.nx;
+                    int py = hit.vy + hit.ny;
+                    int pz = hit.vz + hit.nz;
+                    changed |= worldEditSet(world, px, py, pz, (BlockID)currentMaterial, editMode);
+                }
+
+                if (changed) {
+                    // this walks chunks with wc->needsUpload==true and pushes new VBO/IBO
+                    worldUploadDirty(world, ctx);
+                }
+            }
+        }
+
+        lWasDown = (l == GLFW_PRESS);
+        rWasDown = (r == GLFW_PRESS);
+
+    }
+}
+
+void renderGame(VkCommandBuffer cmd) {
+    // Bind your pipeline, descriptors, etc.
+
+    // Update push constants with camera MVP
+}
+
 int main() 
 {
     try {
@@ -124,7 +386,7 @@ int main()
         if (!glfwVulkanSupported()) throw std::runtime_error("GLFW: Vulkan not supported");
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        GLFWwindow* window = glfwCreateWindow(1280, 720, "Voxel Game (Starter)", nullptr, nullptr);
+        GLFWwindow* window = glfwCreateWindow(1920, 1080, "Voxel Game (Starter)", nullptr, nullptr);
         if (!window) throw std::runtime_error("Failed to create window");
 
         if (glfwRawMouseMotionSupported())
@@ -132,10 +394,6 @@ int main()
 
         //input.init(window);
         glfwSetScrollCallback(window, scroll_cb);
-
-        world.seed = 1337u;
-
-        VulkanContext ctx{};
 
         ctx.window = window;
         glfwSetWindowUserPointer(window, &ctx);
@@ -180,16 +438,6 @@ int main()
             throw std::runtime_error("Failed to create window surface");
         }
 
-        static int   afIndex = 0;
-        static bool  fWasDown = false;                            // edge detector
-        static bool  f3WasDown = false;
-        int currentMaterial = 1;
-        auto clampMat = [&](int m) {
-            if (m < 1) m = MAX_MATERIALS - 1;                 // wrap
-            if (m >= MAX_MATERIALS) m = 1;                    // wrap
-            return m;
-            };
-
         if (!pickPhysicalDevice(ctx)) throw std::runtime_error("No Vulkan device found");
         if (!createDevice(ctx)) throw std::runtime_error("Failed to create device");
         int fbw = 0, fbh = 0;
@@ -205,7 +453,6 @@ int main()
         if (!createCommandPoolAndBuffers(ctx))
             throw std::runtime_error("cmd pool/buffers failed");
         setupDebug(ctx);
-        FPSCamera cam;
         cam.setViewportSize(ctx.swapchainExtent.width, ctx.swapchainExtent.height);
         cam.setCursorCaptured(window, !g_uiMode); // keep cursor mode consistent
         cam.position = { 8.0f, 8.0f, 30.0f }; // tweak as you like
@@ -219,8 +466,10 @@ int main()
             descriptorsReady = true;
         }
         if (!createMaterialUBO(ctx)) throw std::runtime_error("material creation failed");
+        if (!createLightingUBO(ctx))   throw std::runtime_error("lighting UBO failed");
         if (!createDescriptors(ctx))                               // <— makes descSetLayout
             throw std::runtime_error("descriptors failed");
+        if (!createSkyPipeline(ctx, "shaders")) throw std::runtime_error("sky pipeline failed");
         if (!createVoxelPipeline(ctx, "shaders")) throw std::runtime_error("voxel pipeline failed");
         // after swapchain/framebuffers/cmd pool and BEFORE recordCommandBuffers:
         glm::mat4 proj = glm::perspective(glm::radians(60.0f),
@@ -264,8 +513,8 @@ int main()
         int camCz = worldToChunk(cam.position.z);
 
         if (camCx != lastCamCx || camCz != lastCamCz || gViewDist != lastView) {
-            streamEnsureAround(world, ctx, camCx, camCz, gViewDist);
-            streamUnloadFar(world, camCx, camCz, gViewDist + gUnloadSlack);
+            streamEnsureAround(world, ctx, camCx, camCz, world.stream.viewRadius);
+            streamUnloadFar(world, camCx, camCz, world.stream.keepRadius);
 
             lastCamCx = camCx; lastCamCz = camCz;
             lastView = gViewDist;
@@ -278,6 +527,8 @@ int main()
         size_t tris = 0;
         for (auto& kv : world.map) tris += kv.second->meshCPU.indices.size() / 3;
         std::cerr << "[World] created chunks=" << chunks << " tris=" << tris << "\n";
+
+        initGame();
 
         double lastTime = glfwGetTime();
 
@@ -301,8 +552,6 @@ int main()
                 frames = 0; acc = 0.0;
             }
 
-            //input.update(dt);
-
             // Debug Tools
             debugStats.worldRef = &world;
             debugStats.ctxRef = &ctx;
@@ -310,189 +559,11 @@ int main()
             dbgSetCamera(debugStats, cam.position, cam.yaw, cam.pitch);
             dbgCollectWorldStats(world, debugStats);
 
-            // --- UI focus toggle with ESC ---
-            int esc = glfwGetKey(window, GLFW_KEY_ESCAPE);
-            if (esc == GLFW_PRESS && !g_escWasDown) {
-                g_uiMode = !g_uiMode;
-                std::cout << g_uiMode;
-
-                // capture or release cursor for your FPS camera
-                cam.setCursorCaptured(window, !g_uiMode); // true = lock/hide, false = free cursor
-
-                // hard refocus the window (important after fullscreen switches)
-                glfwFocusWindow(window);
-                //ImGui::ClearActiveID();
-            }
-            g_escWasDown = (esc == GLFW_PRESS);
-
-            ImGuiIO& io = ImGui::GetIO();
-
-            // Block gameplay input if:
-            //  - you're in UI mode (Esc toggled), OR
-            //  - ImGui wants the device (hovering widgets, active text box, etc.)
-            const bool blockMouse = g_uiMode || io.WantCaptureMouse;
-            const bool blockKeys = g_uiMode || io.WantCaptureKeyboard;
-
-            // Toggle F3 overlay (edge-triggered)
-            static bool f3WasDown = false;                // persist across frames
-            int f3State = glfwGetKey(window, GLFW_KEY_F3);
-            if (f3State == GLFW_PRESS && !f3WasDown) {    // rising edge
-                debugStats.overlay = !debugStats.overlay;
-            }
-            f3WasDown = (f3State == GLFW_PRESS);
-
-            // Toggle anisotropic filtering level
-            int fState = glfwGetKey(window, GLFW_KEY_F);
-            if (fState == GLFW_PRESS && !fWasDown) {
-                // rising edge
-                const float LEVELS[] = { 1.0f, 4.0f, 8.0f, 16.0f };
-                afIndex = (afIndex + 1) % (int)(sizeof(LEVELS) / sizeof(LEVELS[0]));
-
-                float target = LEVELS[afIndex];
-                if (!ctx.anisotropyFeature) target = 1.0f;
-                target = std::min(target, ctx.maxSamplerAnisotropy);
-
-                if (!recreateAtlasSampler(ctx, target)) {
-                    std::cerr << "[VK] Recreate sampler failed\n";
-                }
-                else {
-                    std::cerr << "[VK] AF set to " << target << "x\n";
-                }
-            }
-            fWasDown = (fState == GLFW_PRESS);
-
-            // Toggle world edit mode
-            static bool bWasDown = false;
-            int bState = glfwGetKey(window, GLFW_KEY_B);
-            if (bState == GLFW_PRESS && !bWasDown) {
-                editMode = (editMode == EditMode::Small) ? EditMode::Big : EditMode::Small;
-                std::cerr << "[EDIT] mode = " << (editMode == EditMode::Small ? "Small" : "Big") << "\n";
-            }
-            bWasDown = (bState == GLFW_PRESS);
-
-            if (g_scrollY != 0.0) {
-                int steps = (g_scrollY > 0.0) ? 1 : -1;
-                currentMaterial = clampMat(currentMaterial + steps);
-                g_scrollY = 0.0;
-
-                char title[256];
-                std::snprintf(title, sizeof(title), "VoxelGame | Mat:%d", currentMaterial);
-                glfwSetWindowTitle(window, title);
-            }
-
-            {
-                static bool pPrev = false;
-                bool pNow = glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS;
-                if (pNow && !pPrev) {
-                    physicsMode = !physicsMode;
-                    player.physicsEnabled = physicsMode;
-                    std::cerr << "[Player] physics " << (physicsMode ? "ON" : "OFF") << "\n";
-                    // sync camera to player or vice versa on toggle
-                    if (physicsMode) {
-                        // put player under camera
-                        player.pos = cam.position - glm::vec3(0, player.p.eyeOffset, 0);
-                        player.vel = glm::vec3(0);
-                    }
-                    else {
-                        // put camera at player eye
-                        cam.position = player.camPosition();
-                    }
-                }
-                pPrev = pNow;
-            }
-
             streamTick(world, ctx, cam);
 
-            if (physicsMode) {
-                static bool spacePrev = false;
-                bool space = glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS;
-                if (space && !spacePrev && player.onGround) {
-                    player.vel.y = player.p.jumpSpeed;
-                    player.onGround = false;
-                }
-                spacePrev = space;
-            }
-
-            
-            glm::vec3 wish(0.0f);
-            if (!blockKeys)
-            {
-                auto camF = glm::normalize(glm::vec3(std::cos(glm::radians(cam.yaw)), 0.0f,
-                    std::sin(glm::radians(cam.yaw))));
-                auto camR = glm::normalize(glm::cross(camF, glm::vec3(0, 1, 0)));
-
-                if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) wish += camF;
-                if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) wish -= camF;
-                if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) wish += camR;
-                if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) wish -= camR;
-                if (glm::length(wish) > 0.0f) wish = glm::normalize(wish);
-            }
-            if (!blockKeys)
-            {
-                if (physicsMode) {
-                    player.simulate(world, wish, dt);
-                    cam.position = player.camPosition();  // camera follows player head
-                    // keep your existing cam yaw/pitch handling (mouse) for look
-                }
-                else {
-                    // your existing free-fly camera movement (use wish & keys to move cam directly)
-                    float flySpeed = 8.0f;
-                    float stepAmount = flySpeed * dt;   // both floats
-                    cam.position += wish * stepAmount;
-                    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) cam.position.y += flySpeed * dt;
-                    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) cam.position.y -= flySpeed * dt;
-                }
-            }
-
-            if(!blockMouse) cam.handleMouse(window);
-            if(!blockKeys) cam.handleKeys(window, dt);
-
-            if (!blockKeys)
-            {
-
-                static bool lWasDown = false, rWasDown = false;
-                int l = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT);
-                int r = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT);
-
-                if ((l == GLFW_PRESS && !lWasDown) || (r == GLFW_PRESS && !rWasDown)) {
-                    // z kamery
-                    glm::vec3 p = cam.position;          // public field v tvojej FPSCamera
-                    glm::vec3 dir = cam.forward();    // smer poh?adu
-                    // else:
-                    float cy = glm::radians(cam.yaw), cp = glm::radians(cam.pitch);
-                    glm::vec3 dir2 = glm::normalize(glm::vec3(std::cos(cp) * std::cos(cy),
-                        std::sin(cp),
-                        std::cos(cp) * std::sin(cy)));
-
-                    RayHit hit = raycastWorld(world, cam.position, dir /*or dir2*/, pickMaxDist);
-                    if (hit.hit) {
-                        bool changed = false;
-
-                        if (l == GLFW_PRESS && !lWasDown) {
-                            // remove the hit voxel (Small/Big depends on editMode)
-                            changed |= worldEditSet(world, hit.vx, hit.vy, hit.vz, 0, editMode);
-                        }
-                        if (r == GLFW_PRESS && !rWasDown) {
-                            // place next to the face we hit (use entry cell or normal offset)
-                            int px = hit.vx + hit.nx;
-                            int py = hit.vy + hit.ny;
-                            int pz = hit.vz + hit.nz;
-                            changed |= worldEditSet(world, px, py, pz, (BlockID)currentMaterial, editMode);
-                        }
-
-                        if (changed) {
-                            // this walks chunks with wc->needsUpload==true and pushes new VBO/IBO
-                            worldUploadDirty(world, ctx);
-                        }
-                    }
-                }
-
-                lWasDown = (l == GLFW_PRESS);
-                rWasDown = (r == GLFW_PRESS);
-
-            }
-
             glfwPollEvents();
+
+            updateGame(window, dt);
 
             glm::mat4 mvp = cam.mvp();
             // At the start of each frame (before drawing)
@@ -516,6 +587,7 @@ int main()
                 if (!createCommandPoolAndBuffers(ctx))
                     throw std::runtime_error("cmd pool/buffers failed");
 
+                if (!createSkyPipeline(ctx, "shaders")) throw std::runtime_error("sky pipeline failed");
                 // Recreate pipeline (depends on render pass & extent)
                 if (!createVoxelPipeline(ctx, "shaders")) throw std::runtime_error("voxel pipeline failed");
 
@@ -557,6 +629,7 @@ int main()
         if (ctx.materialUBOMem) vkFreeMemory(ctx.device, ctx.materialUBOMem, nullptr);
         if (ctx.materialUBO)    vkDestroyBuffer(ctx.device, ctx.materialUBO, nullptr);
         destroyVoxelMesh(ctx);
+        destroySkyPipeline(ctx);
         destroyVoxelPipeline(ctx);
         cleanupSwapchain(ctx);
         if (ctx.instance) vkDestroyInstance(ctx.instance, nullptr);

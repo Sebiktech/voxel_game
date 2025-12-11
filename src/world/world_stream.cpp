@@ -1,9 +1,13 @@
 #include "world/world_stream.hpp"
 #include "world/world_gen2.hpp"
 #include "world/mesher.hpp"
+#include "world/world.hpp"
+#include "vk_utils.hpp"
+#include "settings.hpp"
 #include <algorithm>
 #include <vector>
 #include <cstdio>
+#include <cmath>
 
 static inline bool hasChunk(const World& w, const WorldKey& k) {
     return w.map.find(k) != w.map.end();
@@ -64,4 +68,49 @@ int streamUnloadFar(World& w, int centerCx, int centerCz, int view) {
         w.destroyChunk(k);
     }
     return (int)toErase.size();
+}
+
+// ===== THE MISSING FUNCTION THAT TIES EVERYTHING TOGETHER =====
+void worldStreamTick(World& w, VulkanContext& ctx,
+    const glm::vec3& camPos, const glm::vec3& /*camFwd*/) {
+
+    // Convert player world position to chunk coordinates
+    // camPos is in world space (scaled by VOXEL_SCALE = 0.25)
+
+    // Step 1: World space -> Voxel space
+    const int vx = (int)std::floor(camPos.x / VOXEL_SCALE + 0.5f);
+    const int vz = (int)std::floor(camPos.z / VOXEL_SCALE + 0.5f);
+
+    // Step 2: Voxel space -> Chunk space (using floor division for negatives)
+    auto floordiv = [](int a, int b) -> int {
+        int q = a / b;
+        int r = a % b;
+        return (r && ((r < 0) != (b < 0))) ? (q - 1) : q;
+        };
+
+    const int cx = floordiv(vx, CHUNK_SIZE);
+    const int cz = floordiv(vz, CHUNK_SIZE);
+
+    // Use gViewDist and gUnloadSlack from settings
+    const int viewRadius = gViewDist;
+    const int keepRadius = gViewDist + gUnloadSlack;
+
+    // Debug output every 2 seconds (at 60fps)
+    static int debugTick = 0;
+    if (debugTick++ % 120 == 0) {
+        printf("[Stream] Player at world(%.2f, %.1f, %.2f) -> voxel(%d, %d) -> chunk(%d, %d) | loaded=%zu\n",
+            camPos.x, camPos.y, camPos.z, vx, vz, cx, cz, w.map.size());
+    }
+
+    // Load chunks around player position
+    int loaded = streamEnsureAround(w, ctx, cx, cz, viewRadius);
+
+    // Unload chunks beyond keep radius
+    int unloaded = streamUnloadFar(w, cx, cz, keepRadius);
+
+    // Optional: Log when chunks are created/destroyed
+    if (loaded > 0 || unloaded > 0) {
+        printf("[Stream] Tick: loaded=%d, unloaded=%d, total=%zu\n",
+            loaded, unloaded, w.map.size());
+    }
 }

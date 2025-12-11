@@ -3,6 +3,7 @@
 #include "world/world.hpp"
 #include "world/chunk.hpp"
 #include "world/world_config.hpp"
+#include <limits>
 
 // --- Tunables ---
 struct PlayerParams {
